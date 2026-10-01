@@ -65,8 +65,6 @@ static void nunchuk_poll(struct input_dev *input)
 	zpressed = !(regs[5] & BIT(0));
 	cpressed = !(regs[5] & BIT(1));
 
-	input_report_abs(input, ABS_X, regs[0]);
-	input_report_abs(input, ABS_Y, regs[1]);
 	input_report_key(input, BTN_Z, zpressed);
 	input_report_key(input, BTN_C, cpressed);
 	input_sync(input);
@@ -106,30 +104,9 @@ static int nunchuk_probe(struct i2c_client *client)
 	input->name = "Wii Nunchuk";
 	input->id.bustype = BUS_I2C;
 
-	/* Buttons */
 	set_bit(EV_KEY, input->evbit);
 	set_bit(BTN_C, input->keybit);
 	set_bit(BTN_Z, input->keybit);
-
-	/* Joystick axes */
-	set_bit(EV_ABS, input->evbit);
-	set_bit(ABS_X, input->absbit);
-	set_bit(ABS_Y, input->absbit);
-	input_set_abs_params(input, ABS_X, 30, 220, 4, 8);
-	input_set_abs_params(input, ABS_Y, 40, 200, 4, 8);
-
-	/* Classic gamepad buttons, expected by games */
-	set_bit(BTN_TL, input->keybit);
-	set_bit(BTN_SELECT, input->keybit);
-	set_bit(BTN_MODE, input->keybit);
-	set_bit(BTN_START, input->keybit);
-	set_bit(BTN_TR, input->keybit);
-	set_bit(BTN_TL2, input->keybit);
-	set_bit(BTN_B, input->keybit);
-	set_bit(BTN_Y, input->keybit);
-	set_bit(BTN_A, input->keybit);
-	set_bit(BTN_X, input->keybit);
-	set_bit(BTN_TR2, input->keybit);
 
 	ret = input_setup_polling(input, nunchuk_poll);
 	if (ret) {
