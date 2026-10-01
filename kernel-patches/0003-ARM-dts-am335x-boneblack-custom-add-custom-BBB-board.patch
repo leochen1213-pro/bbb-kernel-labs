@@ -1,0 +1,74 @@
+From 58791e4baee9c9f3635fb829ebc1c2e0e07842a1 Mon Sep 17 00:00:00 2001
+From: Leo <leochen1213@gmail.com>
+Date: Thu, 1 Oct 2026 19:39:24 +0800
+Subject: [PATCH 3/3] ARM: dts: am335x-boneblack-custom: add custom BBB board
+ with Nunchuk on I2C1
+
+---
+ arch/arm/boot/dts/ti/omap/Makefile            |  3 +-
+ .../dts/ti/omap/am335x-boneblack-custom.dts   | 39 +++++++++++++++++++
+ 2 files changed, 41 insertions(+), 1 deletion(-)
+ create mode 100644 arch/arm/boot/dts/ti/omap/am335x-boneblack-custom.dts
+
+diff --git a/arch/arm/boot/dts/ti/omap/Makefile b/arch/arm/boot/dts/ti/omap/Makefile
+index d2b590004fed..cb17969aa034 100644
+--- a/arch/arm/boot/dts/ti/omap/Makefile
++++ b/arch/arm/boot/dts/ti/omap/Makefile
+@@ -87,7 +87,8 @@ dtb-$(CONFIG_SOC_AM33XX) += \
+ 	am335x-base0033.dtb \
+ 	am335x-bone.dtb \
+ 	am335x-boneblack.dtb \
+-	am335x-boneblack-wireless.dtb \
++        am335x-boneblack-custom.dtb \
++        am335x-boneblack-wireless.dtb \
+ 	am335x-boneblue.dtb \
+ 	am335x-bonegreen.dtb \
+ 	am335x-bonegreen-wireless.dtb \
+diff --git a/arch/arm/boot/dts/ti/omap/am335x-boneblack-custom.dts b/arch/arm/boot/dts/ti/omap/am335x-boneblack-custom.dts
+new file mode 100644
+index 000000000000..57e26cdae7d4
+--- /dev/null
++++ b/arch/arm/boot/dts/ti/omap/am335x-boneblack-custom.dts
+@@ -0,0 +1,39 @@
++// SPDX-License-Identifier: GPL-2.0
++#include "am335x-boneblack.dts"
++
++/ {
++	model = "BeagleBone Black - Leo custom";
++
++	leds {
++		led5 {
++			linux,default-trigger = "timer";
++		};
++	};
++};
++
++&am33xx_pinmux {
++	i2c1_pins: i2c1-pins {
++		pinctrl-single,pins = < 
++			/* spi0_d1.i2c1_sda */
++			AM33XX_PADCONF(AM335X_PIN_SPI0_D1, PIN_INPUT_PULLUP, MUX_MODE2)
++			/* spi0_cs0.i2c1_scl */
++			AM33XX_PADCONF(AM335X_PIN_SPI0_CS0, PIN_INPUT_PULLUP, MUX_MODE2)
++		>;
++	};
++};
++
++&i2c1 {
++	pinctrl-names = "default";
++	pinctrl-0 = <&i2c1_pins>;
++	status = "okay";
++	clock-frequency = <100000>;
++
++	joystick@52 {
++		compatible = "nintendo,nunchuk";
++		reg = <0x52>;
++	};
++};
++
++
++
++
+-- 
+2.43.0
+
