@@ -5,15 +5,9 @@
 #include <linux/input.h>
 #include <linux/delay.h>
 #include <linux/bits.h>
-#include <linux/slab.h>
 #include <linux/mod_devicetable.h>
 
-#define NUNCHUK_REGS_LEN	6
-#define NUNCHUK_POLL_MS		50
-
-struct nunchuk_dev {
-	struct i2c_client *i2c_client;
-};
+#define NUNCHUK_REGS_LEN 6
 
 static int nunchuk_write(struct i2c_client *client, u8 reg, u8 val)
 {
@@ -52,33 +46,11 @@ static int nunchuk_read_registers(struct i2c_client *client, u8 *regs)
 	return 0;
 }
 
-static void nunchuk_poll(struct input_dev *input)
-{
-	struct nunchuk_dev *nunchuk = input_get_drvdata(input);
-	struct i2c_client *client = nunchuk->i2c_client;
-	u8 regs[NUNCHUK_REGS_LEN];
-	int zpressed, cpressed;
-
-	if (nunchuk_read_registers(client, regs))
-		return;
-
-	zpressed = !(regs[5] & BIT(0));
-	cpressed = !(regs[5] & BIT(1));
-
-	input_report_key(input, BTN_Z, zpressed);
-	input_report_key(input, BTN_C, cpressed);
-	input_sync(input);
-}
-
 static int nunchuk_probe(struct i2c_client *client)
 {
-	struct nunchuk_dev *nunchuk;
 	struct input_dev *input;
+	u8 regs[NUNCHUK_REGS_LEN];
 	int ret;
-
-	nunchuk = devm_kzalloc(&client->dev, sizeof(*nunchuk), GFP_KERNEL);
-	if (!nunchuk)
-		return -ENOMEM;
 
 	ret = nunchuk_write(client, 0xf0, 0x55);
 	if (ret) {
@@ -94,12 +66,16 @@ static int nunchuk_probe(struct i2c_client *client)
 		return ret;
 	}
 
+	/* The first read only triggers a conversion: discard its data */
+	ret = nunchuk_read_registers(client, regs);
+	if (ret) {
+		dev_err(&client->dev, "first read failed: %d\n", ret);
+		return ret;
+	}
+
 	input = devm_input_allocate_device(&client->dev);
 	if (!input)
 		return -ENOMEM;
-
-	nunchuk->i2c_client = client;
-	input_set_drvdata(input, nunchuk);
 
 	input->name = "Wii Nunchuk";
 	input->id.bustype = BUS_I2C;
@@ -107,13 +83,6 @@ static int nunchuk_probe(struct i2c_client *client)
 	set_bit(EV_KEY, input->evbit);
 	set_bit(BTN_C, input->keybit);
 	set_bit(BTN_Z, input->keybit);
-
-	ret = input_setup_polling(input, nunchuk_poll);
-	if (ret) {
-		dev_err(&client->dev, "failed to set up polling: %d\n", ret);
-		return ret;
-	}
-	input_set_poll_interval(input, NUNCHUK_POLL_MS);
 
 	ret = input_register_device(input);
 	if (ret) {
