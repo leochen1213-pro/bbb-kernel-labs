@@ -30,7 +30,6 @@ struct serial_dev {
 	spinlock_t lock;	/* protects rx_buf/buf_rd/buf_wr, txcount, counters and UART registers */
 	unsigned int sw_overflow;	/* ring buffer full, char dropped */
 	unsigned int hw_overrun;	/* UART_LSR_OE seen */
-	unsigned int yields;		/* times cond_resched() really rescheduled (debug stat, unlocked) */
 };
 
 static u32 reg_read(struct serial_dev *serial, unsigned int reg)
@@ -116,8 +115,7 @@ static ssize_t serial_write(struct file *file, const char __user *buf,
 			serial_write_char(serial, '\r');
 
 		/* Non-preemptible kernel: voluntarily let woken readers run. Lock is NOT held here. */
-		if (cond_resched())
-			serial->yields++;
+		cond_resched();
 	}
 
 	return sz;
@@ -289,8 +287,8 @@ static int serial_remove(struct platform_device *pdev)
 {
 	struct serial_dev *serial = platform_get_drvdata(pdev);
 
-	dev_info(&pdev->dev, "sw_overflow=%u hw_overrun=%u yields=%u\n",
-		 serial->sw_overflow, serial->hw_overrun, serial->yields);
+	dev_info(&pdev->dev, "sw_overflow=%u hw_overrun=%u\n",
+		 serial->sw_overflow, serial->hw_overrun);
 
 	/* Disable interrupts before the clock goes away (devm frees the IRQ later) */
 	reg_write(serial, 0, UART_IER);

@@ -13,7 +13,6 @@
 #include <linux/interrupt.h>
 #include <linux/wait.h>
 #include <linux/spinlock.h>
-#include <linux/sched.h>
 
 #define SERIAL_RESET_COUNTER 0
 #define SERIAL_GET_COUNTER 1
@@ -27,10 +26,7 @@ struct serial_dev {
 	unsigned int buf_rd;
 	unsigned int buf_wr;
 	wait_queue_head_t wait;
-	spinlock_t lock;	/* protects rx_buf/buf_rd/buf_wr, txcount, counters and UART registers */
-	unsigned int sw_overflow;	/* ring buffer full, char dropped */
-	unsigned int hw_overrun;	/* UART_LSR_OE seen */
-	unsigned int yields;		/* times cond_resched() really rescheduled (debug stat, unlocked) */
+	spinlock_t lock;	/* protects rx_buf/buf_rd/buf_wr, txcount and UART registers */
 };
 
 static u32 reg_read(struct serial_dev *serial, unsigned int reg)
@@ -114,10 +110,6 @@ static ssize_t serial_write(struct file *file, const char __user *buf,
 		serial_write_char(serial, c);
 		if (c == '\n')
 			serial_write_char(serial, '\r');
-
-		/* Non-preemptible kernel: voluntarily let woken readers run. Lock is NOT held here. */
-		if (cond_resched())
-			serial->yields++;
 	}
 
 	return sz;
@@ -162,25 +154,16 @@ static const struct file_operations serial_fops = {
 static irqreturn_t serial_irq(int irq, void *dev_id)
 {
 	struct serial_dev *serial = dev_id;
-	unsigned int lsr, next;
-	char c;
 
 	/* Hard IRQ context: local IRQs are already disabled, plain spin_lock() is enough */
 	spin_lock(&serial->lock);
 
 	/* Drain everything the UART has received (reading RX = ack) */
-	while ((lsr = reg_read(serial, UART_LSR)) & UART_LSR_DR) {
-		if (lsr & UART_LSR_OE)		/* reading LSR also clears OE */
-			serial->hw_overrun++;
-
-		c = reg_read(serial, UART_RX);
-		next = (serial->buf_wr + 1) % SERIAL_BUFSIZE;
-		if (next == serial->buf_rd) {	/* buffer full: drop new char, keep old ones */
-			serial->sw_overflow++;
-			continue;
-		}
-		serial->rx_buf[serial->buf_wr] = c;
-		serial->buf_wr = next;
+	while (reg_read(serial, UART_LSR) & UART_LSR_DR) {
+		serial->rx_buf[serial->buf_wr] = reg_read(serial, UART_RX);
+		serial->buf_wr++;
+		if (serial->buf_wr >= SERIAL_BUFSIZE)
+			serial->buf_wr = 0;
 	}
 
 	spin_unlock(&serial->lock);
@@ -288,9 +271,6 @@ err_pm:
 static int serial_remove(struct platform_device *pdev)
 {
 	struct serial_dev *serial = platform_get_drvdata(pdev);
-
-	dev_info(&pdev->dev, "sw_overflow=%u hw_overrun=%u yields=%u\n",
-		 serial->sw_overflow, serial->hw_overrun, serial->yields);
 
 	/* Disable interrupts before the clock goes away (devm frees the IRQ later) */
 	reg_write(serial, 0, UART_IER);
