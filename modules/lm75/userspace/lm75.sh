@@ -25,7 +25,21 @@ to_mc() {
     echo $(( v * 1000 / (1 << (bits - 8)) ))
 }
 
-rd() { swab16 "$(i2cget -y $BUS $ADDR $1 w)"; }
+# Like a driver: check every transfer, never compute on a failed read.
+rd() {
+    v=$(i2cget -y $BUS $ADDR $1 w) || return 1
+    swab16 "$v"
+}
+
+# Fail early with a useful hint instead of a cascade of arithmetic errors.
+if ! i2cget -y $BUS $ADDR 0x01 b >/dev/null 2>&1; then
+    echo "lm75.sh: cannot access 0x${ADDR#0x} on i2c-$BUS" >&2
+    if [ -e /sys/bus/i2c/devices/$BUS-00${ADDR#0x}/driver ]; then
+        echo "  bound to kernel driver: $(basename "$(readlink /sys/bus/i2c/devices/$BUS-00${ADDR#0x}/driver)")" >&2
+        echo "  use /sys/class/hwmon/*/temp1_* instead, or rmmod the driver" >&2
+    fi
+    exit 1
+fi
 
 # $1 = register, $2 = integer degC
 wr_c() {
@@ -42,8 +56,10 @@ set)
     esac
     ;;
 *)
-    t=$(rd 0x00); hy=$(rd 0x02); os=$(rd 0x03)
-    conf=$(i2cget -y $BUS $ADDR 0x01 b)
+    t=$(rd 0x00)  || exit 1
+    hy=$(rd 0x02) || exit 1
+    os=$(rd 0x03) || exit 1
+    conf=$(i2cget -y $BUS $ADDR 0x01 b) || exit 1
     printf 'Conf  = %s\n' "$conf"
     printf 'Temp  = 0x%04x -> %6d mC\n' $t  $(to_mc $t 11)
     printf 'Thyst = 0x%04x -> %6d mC\n' $hy $(to_mc $hy 9)
