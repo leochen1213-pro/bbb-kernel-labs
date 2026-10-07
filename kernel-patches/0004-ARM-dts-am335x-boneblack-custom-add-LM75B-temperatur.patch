@@ -1,0 +1,38 @@
+From aa3c91e36c353225e65df9764931a5e5d83802fa Mon Sep 17 00:00:00 2001
+From: Leo <leochen1213@gmail.com>
+Date: Wed, 7 Oct 2026 17:18:48 +0800
+Subject: [PATCH] ARM: dts: am335x-boneblack-custom: add LM75B temperature
+ sensor on I2C1
+
+Describe the NXP LM75B digital temperature sensor wired to the I2C1
+bus (P9_17 SCL, P9_18 SDA). Its A2..A0 address pins are tied low on the
+breakout module, so it responds at address 0x48. It shares the bus with
+the Nunchuk at 0x52.
+
+The device is handled by the existing lm75 hwmon driver. The OS output
+pin is not wired to the SoC yet, so no interrupt is described.
+
+Signed-off-by: Leo <leochen1213@gmail.com>
+---
+ arch/arm/boot/dts/ti/omap/am335x-boneblack-custom.dts | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/arch/arm/boot/dts/ti/omap/am335x-boneblack-custom.dts b/arch/arm/boot/dts/ti/omap/am335x-boneblack-custom.dts
+index 1f356194e197..e150ceb31abf 100644
+--- a/arch/arm/boot/dts/ti/omap/am335x-boneblack-custom.dts
++++ b/arch/arm/boot/dts/ti/omap/am335x-boneblack-custom.dts
+@@ -28,6 +28,11 @@ &i2c1 {
+ 	status = "okay";
+ 	clock-frequency = <100000>;
+ 
++	temperature-sensor@48 {
++		compatible = "national,lm75b";
++		reg = <0x48>;
++	};
++
+ 	joystick@52 {
+ 		compatible = "nintendo,nunchuk";
+ 		reg = <0x52>;
+-- 
+2.43.0
+
