@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * lm75lab.c - minimal NXP LM75B driver (learning exercise)
+ * Minimal NXP LM75B driver (learning exercise)
  *
- * Step 3.3: temp1_max / temp1_max_hyst, 9-bit limit conversion,
- *           Tos > Thyst enforcement protected by a mutex.
+ * Step 3.4: OS pin as interrupt (threaded IRQ, IRQF_ONESHOT),
+ *           temp1_max_alarm with hwmon_notify_event().
  */
+#include <linux/bits.h>
 #include <linux/hwmon.h>
 #include <linux/i2c.h>
+#include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/minmax.h>
 #include <linux/mod_devicetable.h>
@@ -19,17 +21,25 @@
 #define LM75_REG_THYST		0x02
 #define LM75_REG_TOS		0x03
 
+/* Conf register bits (datasheet Table 8) */
+#define LM75_CONF_SHUTDOWN	BIT(0)
+#define LM75_CONF_OS_INT	BIT(1)	/* 0 = comparator, 1 = interrupt */
+#define LM75_CONF_OS_POL	BIT(2)	/* 0 = active low, 1 = active high */
+
 /* Operating range (datasheet), used to clamp user-supplied limits */
 #define LM75_TEMP_MIN_MC	(-55000)
 #define LM75_TEMP_MAX_MC	125000
 
 struct lm75lab {
 	struct i2c_client *client;
+	struct device *hwmon_dev;
 	/*
-	 * Serializes multi-transfer sequences: checking one limit
-	 * against the other and then writing it must not interleave.
+	 * Serializes multi-transfer sequences (limit check-then-write,
+	 * IRQ thread temp/limit reads) and protects @alarm.
 	 */
 	struct mutex lock;
+	bool alarm;
+	u8 orig_conf;		/* restored on unbind */
 };
 
 /* Temp: 11-bit two's complement in bits [15:5], 0.125 degC/LSB */
@@ -46,8 +56,6 @@ static long lm75lab_limit_to_mc(s16 reg)
 
 /*
  * Millidegree -> 9-bit limit register, rounded to the nearest 0.5 degC.
- * Uses the limit resolution (9 bits), not the temperature resolution
- * (11 bits), so the value written is exactly what the chip stores.
  * Multiply instead of shifting: left-shifting a negative value is UB.
  */
 static u16 lm75lab_mc_to_limit(long mc)
@@ -88,6 +96,11 @@ static int lm75lab_read(struct device *dev, enum hwmon_sensor_types type,
 		return lm75lab_read_limit(data, LM75_REG_TOS, val);
 	case hwmon_temp_max_hyst:
 		return lm75lab_read_limit(data, LM75_REG_THYST, val);
+	case hwmon_temp_max_alarm:
+		mutex_lock(&data->lock);
+		*val = data->alarm;
+		mutex_unlock(&data->lock);
+		return 0;
 	default:
 		return -EOPNOTSUPP;
 	}
@@ -141,6 +154,8 @@ static umode_t lm75lab_is_visible(const void *drvdata,
 				  enum hwmon_sensor_types type,
 				  u32 attr, int channel)
 {
+	const struct lm75lab *data = drvdata;
+
 	if (type != hwmon_temp)
 		return 0;
 
@@ -150,6 +165,9 @@ static umode_t lm75lab_is_visible(const void *drvdata,
 	case hwmon_temp_max:
 	case hwmon_temp_max_hyst:
 		return 0644;
+	case hwmon_temp_max_alarm:
+		/* Only meaningful when the OS pin is wired to an interrupt */
+		return data->client->irq > 0 ? 0444 : 0;
 	default:
 		return 0;
 	}
@@ -157,7 +175,8 @@ static umode_t lm75lab_is_visible(const void *drvdata,
 
 static const struct hwmon_channel_info * const lm75lab_info[] = {
 	HWMON_CHANNEL_INFO(temp,
-			   HWMON_T_INPUT | HWMON_T_MAX | HWMON_T_MAX_HYST),
+			   HWMON_T_INPUT | HWMON_T_MAX | HWMON_T_MAX_HYST |
+			   HWMON_T_MAX_ALARM),
 	NULL
 };
 
@@ -172,12 +191,92 @@ static const struct hwmon_chip_info lm75lab_chip_info = {
 	.info = lm75lab_info,
 };
 
+/*
+ * Runs in process context (may sleep), with the IRQ line kept masked
+ * by IRQF_ONESHOT until we return. In interrupt mode any register read
+ * releases OS, which deasserts the level-low interrupt.
+ */
+static irqreturn_t lm75lab_irq_thread(int irq, void *dev_id)
+{
+	struct lm75lab *data = dev_id;
+	long temp = 0, temp9, tos, thyst;
+	bool changed = false, alarm = false;
+	int ret;
+
+	mutex_lock(&data->lock);
+
+	/* Read Temp first: this read is what clears the OS output */
+	ret = i2c_smbus_read_word_swapped(data->client, LM75_REG_TEMP);
+	if (ret < 0)
+		goto unlock;
+	temp = lm75lab_temp_to_mc((s16)ret);
+	/*
+	 * The chip compares only the 9 MSBs of Temp (0.5 degC steps) against
+	 * the limits, inclusively on both sides: OS fires at T9 >= Tos and
+	 * again at T9 <= Thyst. Decide with the same view of the temperature,
+	 * otherwise e.g. 28.375 degC (T9 = 28.0) never clears Thyst = 28.0.
+	 */
+	temp9 = lm75lab_limit_to_mc((s16)ret);
+
+	ret = lm75lab_read_limit(data, LM75_REG_TOS, &tos);
+	if (ret < 0)
+		goto unlock;
+	ret = lm75lab_read_limit(data, LM75_REG_THYST, &thyst);
+	if (ret < 0)
+		goto unlock;
+
+	/*
+	 * Interrupt mode signals both crossings: decide which one it was from
+	 * the state, not by toggling, so a repeated (spurious) IRQ is harmless.
+	 */
+	if (!data->alarm && temp9 >= tos) {
+		data->alarm = true;
+		changed = true;
+	} else if (data->alarm && temp9 <= thyst) {
+		data->alarm = false;
+		changed = true;
+	}
+	alarm = data->alarm;	/* snapshot for logging outside the lock */
+
+unlock:
+	mutex_unlock(&data->lock);
+
+	if (ret < 0) {
+		/* OS stays asserted: the line will fire again, so rate-limit */
+		dev_err_ratelimited(&data->client->dev,
+				    "IRQ: failed to read sensor: %d\n", ret);
+		return IRQ_HANDLED;
+	}
+
+	if (changed) {
+		dev_info(&data->client->dev, "alarm %s at %ld mC\n",
+			 alarm ? "raised" : "cleared", temp);
+		/* Wakes up user space poll()/select() on temp1_max_alarm */
+		hwmon_notify_event(data->hwmon_dev, hwmon_temp,
+				   hwmon_temp_max_alarm, 0);
+	}
+
+	return IRQ_HANDLED;
+}
+
+static void lm75lab_restore_conf(void *arg)
+{
+	struct lm75lab *data = arg;
+	int ret;
+
+	/* devm actions cannot fail, but a lost write must not go unnoticed */
+	ret = i2c_smbus_write_byte_data(data->client, LM75_REG_CONF,
+					data->orig_conf);
+	if (ret < 0)
+		dev_warn(&data->client->dev,
+			 "failed to restore config register: %d\n", ret);
+}
+
 static int lm75lab_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
-	struct device *hwmon_dev;
 	struct lm75lab *data;
-	int conf;
+	int conf, ret;
 
 	if (!i2c_check_functionality(client->adapter,
 				     I2C_FUNC_SMBUS_BYTE_DATA |
@@ -196,22 +295,54 @@ static int lm75lab_probe(struct i2c_client *client)
 	if (conf < 0)
 		return dev_err_probe(dev, conf,
 				     "failed to read config register\n");
+	data->orig_conf = conf;
 
-	/* Register last: user space may access the attributes right after */
-	hwmon_dev = devm_hwmon_device_register_with_info(dev, "lm75lab", data,
-							 &lm75lab_chip_info,
-							 NULL);
-	if (IS_ERR(hwmon_dev))
-		return PTR_ERR(hwmon_dev);
+	if (client->irq > 0) {
+		/* Interrupt mode, OS active low to match IRQ_TYPE_LEVEL_LOW */
+		conf |= LM75_CONF_OS_INT;
+		conf &= ~LM75_CONF_OS_POL;
+		ret = i2c_smbus_write_byte_data(client, LM75_REG_CONF, conf);
+		if (ret < 0)
+			return dev_err_probe(dev, ret,
+					     "failed to write config register\n");
+	}
 
-	dev_info(dev, "probed at 0x%02x, conf=0x%02x, %s\n",
-		 client->addr, conf, dev_name(hwmon_dev));
+	/* Put the chip back as we found it on unbind (runs last, see below) */
+	ret = devm_add_action_or_reset(dev, lm75lab_restore_conf, data);
+	if (ret)
+		return ret;
+
+	data->hwmon_dev = devm_hwmon_device_register_with_info(dev, "lm75lab",
+							       data,
+							       &lm75lab_chip_info,
+							       NULL);
+	if (IS_ERR(data->hwmon_dev))
+		return PTR_ERR(data->hwmon_dev);
+
+	/*
+	 * Request the IRQ last: the thread uses hwmon_dev. devm releases in
+	 * reverse order, so on unbind the IRQ goes first, then hwmon, then
+	 * the config is restored.
+	 */
+	if (client->irq > 0) {
+		ret = devm_request_threaded_irq(dev, client->irq, NULL,
+						lm75lab_irq_thread,
+						IRQF_ONESHOT, dev_name(dev),
+						data);
+		if (ret)
+			return dev_err_probe(dev, ret, "failed to request IRQ %d\n",
+					     client->irq);
+	}
+
+	dev_info(dev, "probed at 0x%02x, conf=0x%02x->0x%02x, irq=%d, %s\n",
+		 client->addr, data->orig_conf, conf, client->irq,
+		 dev_name(data->hwmon_dev));
 	return 0;
 }
 
 static void lm75lab_remove(struct i2c_client *client)
 {
-	/* devm releases hwmon_dev and data in reverse order after this */
+	/* devm releases IRQ, hwmon_dev, conf restore, data in that order */
 	dev_info(&client->dev, "removed\n");
 }
 
