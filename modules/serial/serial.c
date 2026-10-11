@@ -19,6 +19,16 @@
 #define SERIAL_GET_COUNTER 1
 #define SERIAL_BUFSIZE 16
 
+/*
+ * Locking experiments (NEVER use bug != 0 outside this lab!):
+ *   0 = correct code
+ *   1 = experiment A: put_user() called while holding the spinlock
+ *   2 = experiment B: read() takes the lock with plain spin_lock() (IRQs still enabled)
+ */
+static int bug;
+module_param(bug, int, 0444);	/* read-only: must not change between lock and unlock */
+MODULE_PARM_DESC(bug, "0=correct, 1=put_user under spinlock, 2=spin_lock without irqsave in read()");
+
 struct serial_dev {
 	void __iomem *regs;
 	struct miscdevice miscdev;
@@ -59,13 +69,30 @@ static void serial_write_char(struct serial_dev *serial, char c)
 	spin_unlock_irqrestore(&serial->lock, flags);
 }
 
+static void rd_lock(struct serial_dev *serial, unsigned long *flags)
+{
+	if (bug == 2)
+		spin_lock(&serial->lock);		/* WRONG: IRQs stay enabled */
+	else
+		spin_lock_irqsave(&serial->lock, *flags);
+}
+
+static void rd_unlock(struct serial_dev *serial, unsigned long *flags)
+{
+	if (bug == 2)
+		spin_unlock(&serial->lock);
+	else
+		spin_unlock_irqrestore(&serial->lock, *flags);
+}
+
 static ssize_t serial_read(struct file *file, char __user *buf,
 			   size_t sz, loff_t *ppos)
 {
 	struct miscdevice *miscdev = file->private_data;
 	struct serial_dev *serial = container_of(miscdev, struct serial_dev, miscdev);
-	unsigned long flags;
+	unsigned long flags = 0;
 	char c;
+	int ret;
 
 	if (sz == 0)
 		return 0;
@@ -76,11 +103,11 @@ retry:
 				     serial->buf_rd != serial->buf_wr))
 		return -ERESTARTSYS;	/* woken up by a signal (e.g. Ctrl-C) */
 
-	spin_lock_irqsave(&serial->lock, flags);
+	rd_lock(serial, &flags);
 
 	/* Another reader may have taken the character between wake-up and lock */
 	if (serial->buf_rd == serial->buf_wr) {
-		spin_unlock_irqrestore(&serial->lock, flags);
+		rd_unlock(serial, &flags);
 		goto retry;
 	}
 
@@ -89,7 +116,14 @@ retry:
 	if (serial->buf_rd >= SERIAL_BUFSIZE)
 		serial->buf_rd = 0;
 
-	spin_unlock_irqrestore(&serial->lock, flags);
+	if (bug == 1) {
+		/* WRONG: put_user() may fault and sleep while we hold a spinlock */
+		ret = put_user(c, buf);
+		rd_unlock(serial, &flags);
+		return ret ? -EFAULT : 1;
+	}
+
+	rd_unlock(serial, &flags);
 
 	/* put_user() may fault and sleep: must be called outside the spinlock */
 	if (put_user(c, buf))
