@@ -1,0 +1,35 @@
+From 4fc365f18a75d5ccecc587a67a5c3e629c734501 Mon Sep 17 00:00:00 2001
+From: Leo <leochen1213@gmail.com>
+Date: Tue, 13 Oct 2026 16:06:12 +0800
+Subject: [PATCH] ARM: dts: am335x-boneblack-custom: add SSD1306 OLED on I2C1
+
+---
+ .../arm/boot/dts/ti/omap/am335x-boneblack-custom.dts | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm/boot/dts/ti/omap/am335x-boneblack-custom.dts b/arch/arm/boot/dts/ti/omap/am335x-boneblack-custom.dts
+index 6de837d7c95e..c91b6d7472f8 100644
+--- a/arch/arm/boot/dts/ti/omap/am335x-boneblack-custom.dts
++++ b/arch/arm/boot/dts/ti/omap/am335x-boneblack-custom.dts
+@@ -35,7 +35,17 @@ &i2c1 {
+ 	pinctrl-0 = <&i2c1_pins>;
+ 	status = "okay";
+ 	clock-frequency = <100000>;
+-
++	
++	oled@3c {
++		compatible = "solomon,ssd1306";
++		reg = <0x3c>;
++		solomon,width = <128>;
++		solomon,height = <32>;
++		solomon,page-offset = <0>;
++		solomon,com-seq;
++		solomon,com-invdir;
++	};
++	
+ 	temperature-sensor@48 {
+ 		compatible = "national,lm75b";
+ 		reg = <0x48>;
+-- 
+2.43.0
+
