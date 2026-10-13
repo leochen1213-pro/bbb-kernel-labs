@@ -30,9 +30,9 @@ docs/                notes and logic analyzer captures
       ([notes](docs/stage1-notes.md))
 - [ ] 1b Logic analyzer: `0x00` (command) vs `0x40` (data) control byte, time a 513-byte write
 - [x] **2 Upstream driver** — DT node `solomon,ssd1306` + `CONFIG_DRM_SSD130X_I2C`, then disable ([notes](docs/stage2-notes.md))
-- [ ] **3 Own driver**
-  - [ ] 3.1 `i2c_driver` skeleton, `of_match_table("leo,ssd1306")`, `module_i2c_driver`
-  - [ ] 3.2 `probe()` sends init sequence, `remove()` turns display off
+- [x] **3 Own driver**
+  - [x] 3.1 `i2c_driver` skeleton, `of_match_table("leo,ssd1306")`, `module_i2c_driver`
+  - [x] 3.2 `probe()` sends init sequence, `remove()` turns display off
   - [ ] 3.3 `struct oled` + misc device + mutex, `write()` takes 512 bytes → `oled_temp` ⭐
   - [ ] 3.4 sysfs: `contrast` / `invert` / `display`
   - [ ] 3.5 Performance: 100 kHz vs 400 kHz, send only dirty pages
