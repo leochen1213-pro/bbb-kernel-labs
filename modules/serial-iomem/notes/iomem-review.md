@@ -28,3 +28,17 @@
   because ARM ioremap reuses static mappings (find_static_vm_paddr)
 - %p is hashed with a per-boot key; %px shows the raw value (debug only)
 
+## Step 4: register accessors + runtime PM
+- reg_read/reg_write: serial_reg.h gives register INDEXES; OMAP byte offset = index * 4; use readl/writel
+- Read with runtime PM on: MVER 0x50412603 (UART IP rev 6.3), SYSS 0x1 (RESETDONE), LSR 0x60 (THRE|TEMT)
+- runtime_status: before insmod uart=unsupported parent=suspended; loaded uart=active parent=active;
+  after rmmod uart=unsupported parent=suspended (parent target-module/ti-sysc gates the module clock)
+- pm_runtime_resume_and_get() preferred over pm_runtime_get_sync() (the latter keeps the usage count on failure)
+- runtime PM is not devm here -> remove() must put_sync + disable (first time remove() has real work)
+- SURPRISE: skip_pm=1 did NOT crash: driver core does pm_runtime_get_sync(dev->parent) around probe
+  (drivers/base/dd.c __driver_probe_device, ~line 793/804), then pm_runtime_put() (async) afterwards.
+  => registers readable during probe even without runtime PM, but NOT afterwards. Never rely on it.
+- devmem 0x48024050 with parent suspended: "external abort on non-linefetch (0x1018)" + Bus error (SIGBUS);
+  page-table dump pte=48024xxx proves the mapping was correct -> the clock-gated module refused the access.
+  With parent active: devmem reads 0x50412603.
+- FSR 0x1018: FS=0b01000 synchronous external abort, WnR=0 (read), ExT=1 (AXI slave error)
