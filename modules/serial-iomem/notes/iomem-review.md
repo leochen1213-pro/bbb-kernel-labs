@@ -42,3 +42,25 @@
   page-table dump pte=48024xxx proves the mapping was correct -> the clock-gated module refused the access.
   With parent active: devmem reads 0x50412603.
 - FSR 0x1018: FS=0b01000 synchronous external abort, WnR=0 (read), ExT=1 (AXI slave error)
+
+## Step 5: line and baud rate configuration (115200 8N1) + FIFO reset
+- uartclk from DT: of_property_read_u32(np, "clock-frequency") = 48000000
+  (inherited from the SoC .dtsi; our board DTS does not override it)
+- First failure point AFTER runtime PM is on -> must "goto err_pm" (put_sync + disable), not plain return
+- Divisor (UART 16x mode): baud = uartclk / (16 * div) -> div = 48000000/16/115200 = 26.04 -> 26
+  real baud 115384.6 = +0.16 % (UART tolerates roughly +-2 %)
+- Register sequence (order matters):
+    MDR1 = 0x7   UART disabled (TRM: divisor must be changed while disabled)
+    LCR  = 0x0   known state
+    LCR  = DLAB  bit7=1: offset 0x00/0x04 become DLL/DLH instead of THR-RHR/IER (register banking)
+    DLL  = 0x1a, DLM = 0x00   16-bit divisor
+    LCR  = WLEN8 (0x03)  8 data bits, no parity, 1 stop (8N1), DLAB back to 0
+    MDR1 = 0x0   UART 16x mode -> enabled
+- FCR = CLEAR_RCVR|CLEAR_XMIT (0x06): flush FIFOs; FIFO enable bit0 NOT set ->
+  FIFOs disabled, 1-byte holding registers (root cause of the RX overruns in the interrupt/locking labs)
+- Read-back on both UARTs: LCR 0x03, MDR1 0x00, DLL 0x1a, DLM 0x00
+  (DLL/DLM only visible with LCR.DLAB=1: set DLAB, read, restore LCR)
+- Pitfall: without the DLAB step, "write DLL" (index 0) actually writes THR -> 0x1A (Ctrl-Z)
+  is queued for transmission, and "write DLM" (index 1) writes IER; DLL keeps its old value
+- Configured != transmitting: TX line stays idle HIGH until a byte is written to THR (Step 6)
+- reg_write() is now used -> the "defined but not used" warning is gone
