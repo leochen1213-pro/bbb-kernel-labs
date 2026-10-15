@@ -64,3 +64,45 @@
   is queued for transmission, and "write DLM" (index 1) writes IER; DLL keeps its old value
 - Configured != transmitting: TX line stays idle HIGH until a byte is written to THR (Step 6)
 - reg_write() is now used -> the "defined but not used" warning is gone
+
+## Step 6: send characters from probe()
+### Code
+- serial_write_char(): busy-wait on LSR.THRE (bit5) with cpu_relax(), then write THR (index 0, valid because DLAB=0)
+- serial_write_str(): loops over the string; probe() sends "Hello\r\n" and prints LSR right after
+- No timeout in the lab version: if the UART is not clocked/enabled, the loop never ends
+  -> production code should use readl_poll_timeout_atomic()
+
+### Results
+- Logic analyzer CH3(D2) on P9_21 (UART2 TX), sigrok uart decoder @115200:
+  48 65 6C 6C 6F 0D 0A = "Hello\r\n"
+- LSR right after the last write = 0x00 (THRE=0, TEMT=0): the CPU writes in ns,
+  one character takes ~87 us on the wire
+- Loopback with devmem (module loaded, both UARTs configured):
+    write 0x41 to UART2 THR (0x48024000)
+    -> UART4 LSR 0x61 (DR=1) -> UART4 RHR 0x41 ('A') -> UART4 LSR back to 0x60
+  => a byte travelled UART2 TX -> wire -> UART4 RX using only the Step 5 configuration
+
+### Surprises
+- UART4 initial LSR was 0x63 (DR=1, OE=1) on a reload: with the P9_21->P9_11 loopback wire,
+  UART4 had already received UART2's "Hello" before its own probe, and overrun
+  (1-byte holding register, FIFO disabled)
+- CONFIRMED after reboot: first load -> UART4 initial LSR 0x60 (reset state, MDR1=0x7 -> RX disabled);
+  later loads in the same boot -> 0x63, because register context survives rmmod
+  (only the clock is gated, the PER power domain stays on)
+- Reading RHR while DR=0 returned 0x48 ('H'): a stale value left from that earlier reception
+- Lessons:
+  * drivers must not assume hardware is in reset state: reset the module or rewrite every
+    register in probe, and flush the FIFOs
+  * always check LSR.DR before trusting RHR
+- Parent autosuspend_delay_ms -> EIO: autosuspend not used, so the parent suspends as soon as
+  its usage count reaches 0
+- OPEN: UART4 received while its parent target-module was runtime-suspended.
+  Check ti-sysc and the TRM clock domain chapter: is the functional clock really gated in that state?
+
+- CONFIRMED after reboot: first load -> UART4 initial LSR 0x60 (reset state, MDR1=0x7 -> RX disabled);
+  later loads in the same boot -> 0x63, because register context survives rmmod
+  (only the clock is gated, the PER power domain stays on).
+  Lessons: do not assume reset state (reset or rewrite every register in probe, flush FIFOs),
+  and always check LSR.DR before trusting RHR.
+- OPEN: UART4 received while its parent target-module was runtime-suspended.
+  Check ti-sysc and the TRM clock domain chapter: is the functional clock really gated in that state?

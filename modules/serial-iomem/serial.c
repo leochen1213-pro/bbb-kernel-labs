@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
-// SPDX-License-Identifier: GPL-2.0
 /*
- * I/O memory lab review - Step 5
- * Line and baud rate configuration (115200 8N1) + FIFO reset.
+ * I/O memory lab review - Step 6
+ * Send characters from probe() by polling LSR.THRE and writing THR.
  */
 
 #include <linux/init.h>
@@ -44,6 +43,32 @@ static u32 reg_read(struct serial_dev *serial, unsigned int reg)
 static void reg_write(struct serial_dev *serial, u32 val, unsigned int reg)
 {
 	writel(val, serial->regs + reg * 4);
+}
+
+
+/*
+ * NEW (Step 6): send one character (polling / PIO).
+ * 1. Busy-wait until LSR.THRE (bit 5) = 1: the Transmit Holding Register is
+ *    empty and can take a new byte. cpu_relax() tells the CPU/compiler we are
+ *    spinning (and keeps the loop from being optimized into something odd).
+ * 2. Write the byte to UART_TX (index 0 = THR while LCR.DLAB = 0).
+ * Note: no timeout here (lab version). If the UART is not clocked/enabled this
+ * loops forever -> a production driver would use readl_poll_timeout_atomic().
+ */
+
+static void serial_write_char(struct serial_dev *serial, char c)
+{
+	while (!(reg_read(serial, UART_LSR) & UART_LSR_THRE))
+		cpu_relax();
+
+	reg_write(serial, c, UART_TX);
+}
+
+/* NEW (Step 6): send a string, character by character */
+static void serial_write_str(struct serial_dev *serial, const char *s)
+{
+	while (*s)
+		serial_write_char(serial, *s++);
 }
 
 static int serial_probe(struct platform_device *pdev)
@@ -167,11 +192,25 @@ static int serial_probe(struct platform_device *pdev)
 
 	dev_info(&pdev->dev, "uartclk %u Hz, divisor %u -> LCR 0x%02x MDR1 0x%02x DLL 0x%02x DLM 0x%02x\n",
 		 uartclk, baud_divisor, lcr, mdr1, dll, dlm);
+	
+	/*
+	 * NEW (Step 6): send our first characters!
+	 * Expected on the wire (8N1, LSB first): 48 65 6C 6C 6F 0D 0A
+	 */
+	serial_write_str(serial, "Hello\r\n");
 
+
+	/*
+	 * NEW (Step 6): LSR right after the last write.
+	 * Usually 0x00 or 0x20: the last byte(s) may still be shifting out
+	 * (TEMT=0). Compare with 0x60 = completely idle.
+	 */
+	lsr = reg_read(serial, UART_LSR);
+	dev_info(&pdev->dev, "sent \"Hello\\r\\n\", LSR now 0x%02x\n", lsr);
 
 	return 0;
 
-	err_pm:	/* NEW (Step 5) */
+	err_pm:	
 		if (!skip_pm) {
 			pm_runtime_put_sync(&pdev->dev);
 			pm_runtime_disable(&pdev->dev);
@@ -214,5 +253,6 @@ static struct platform_driver serial_driver = {
 module_platform_driver(serial_driver);
 
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("I/O memory lab review: UART line/baud configuration");
+MODULE_DESCRIPTION("I/O memory lab review: send first characters over the UART");
+ 
 
