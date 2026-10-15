@@ -20,3 +20,11 @@
   device symlinks appear only when compatible matches AND probe() returns 0
 - bind/unbind in sysfs re-runs probe/remove for a single device without rmmod
 - Pitfall: cd failure + echo > unbind created plain files in ~ ; use full paths in /sys
+
+## Step 3: private struct + ioremap
+- devm_kzalloc per device; devm_platform_ioremap_resource = get resource + request_mem_region + ioremap
+- /proc/iomem shows "48024000-48024fff : 48024000.serial serial@0" while bound, gone after rmmod
+- Virtual address is FIXED: phys 0x48xxxxxx -> virt 0xfaxxxxxx (OMAP static iotable for L4_PER),
+  because ARM ioremap reuses static mappings (find_static_vm_paddr)
+- %p is hashed with a per-boot key; %px shows the raw value (debug only)
+
