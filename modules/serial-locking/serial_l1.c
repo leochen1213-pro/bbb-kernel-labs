@@ -1,34 +1,58 @@
 // SPDX-License-Identifier: GPL-2.0
+/*
+ * Locking lab review - L1
+ * One spinlock protects:
+ *   - the RX circular buffer (rx_buf, buf_rd, buf_wr), shared by the IRQ
+ *     handler and read()
+ *   - the UART registers (and txcount), touched by write(), ioctl() and
+ *     the IRQ handler
+ *
+ * Based on the interrupts review I3. Lines marked "NEW (L1)" are new.
+ * Also folded in from I4 experiment A: a full buffer is detected and
+ * the NEW character is dropped (never wrap into an "empty" buffer).
+ */
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
+#include <linux/mod_devicetable.h>
 #include <linux/io.h>
-#include <linux/of.h>
 #include <linux/pm_runtime.h>
 #include <linux/serial_reg.h>
+#include <linux/of.h>
 #include <linux/miscdevice.h>
 #include <linux/fs.h>
 #include <linux/uaccess.h>
-#include <linux/mod_devicetable.h>
 #include <linux/interrupt.h>
 #include <linux/wait.h>
-#include <linux/spinlock.h>
+#include <linux/spinlock.h>		/* NEW (L1): spinlock_t, spin_lock*() */
 
-#define SERIAL_RESET_COUNTER 0
-#define SERIAL_GET_COUNTER 1
-#define SERIAL_BUFSIZE 16
+#define SERIAL_BAUD	115200
+#define SERIAL_BUFSIZE	16
+
+#define SERIAL_RESET_COUNTER	0
+#define SERIAL_GET_COUNTER	1
 
 struct serial_dev {
 	void __iomem *regs;
 	struct miscdevice miscdev;
+
+	/*
+	 * NEW (L1): protects everything below it, AND every access to the
+	 * UART registers after probe(). Taken from process context
+	 * (read/write/ioctl) and from hard IRQ context (serial_irq).
+	 */
+	spinlock_t lock;
+
 	unsigned int txcount;
 	char rx_buf[SERIAL_BUFSIZE];
 	unsigned int buf_rd;
 	unsigned int buf_wr;
-	wait_queue_head_t wait;
-	spinlock_t lock;	/* protects rx_buf/buf_rd/buf_wr, txcount, counters and UART registers */
-	unsigned int sw_overflow;	/* ring buffer full, char dropped */
-	unsigned int hw_overrun;	/* UART_LSR_OE seen */
+
+	unsigned int irq_count;
+	unsigned int sw_overflow;	/* NEW (L1): buffer full, new char dropped */
+	unsigned int hw_overrun;	/* NEW (L1): LSR.OE seen */
+
+	wait_queue_head_t wait;		/* has its own internal lock */
 };
 
 static u32 reg_read(struct serial_dev *serial, unsigned int reg)
@@ -41,42 +65,63 @@ static void reg_write(struct serial_dev *serial, u32 val, unsigned int reg)
 	writel(val, serial->regs + reg * 4);
 }
 
+/*
+ * NEW (L1): send one char, register access under the lock.
+ *
+ * Process context, but the IRQ handler takes the same lock
+ * -> spin_lock_irqsave(): with local IRQs still enabled, the handler
+ * could interrupt us while we hold the lock and spin on it forever
+ * (deadlock on a single CPU).
+ *
+ * The lock is NOT held while waiting for THRE: holding it would keep
+ * local IRQs off for up to one character time (87 us), long enough to
+ * make the receiving UART overrun (I4 experiment C). So: check and
+ * write atomically, otherwise release, relax, retry.
+ */
 static void serial_write_char(struct serial_dev *serial, char c)
 {
 	unsigned long flags;
 
-	/* Process context, but the IRQ handler also touches the registers */
-	spin_lock_irqsave(&serial->lock, flags);
-
-	while (!(reg_read(serial, UART_LSR) & UART_LSR_THRE))
+	for (;;) {
+		spin_lock_irqsave(&serial->lock, flags);
+		if (reg_read(serial, UART_LSR) & UART_LSR_THRE) {
+			reg_write(serial, c, UART_TX);
+			serial->txcount++;
+			spin_unlock_irqrestore(&serial->lock, flags);
+			return;
+		}
+		spin_unlock_irqrestore(&serial->lock, flags);
 		cpu_relax();
-
-	reg_write(serial, c, UART_TX);
-	serial->txcount++;
-
-	spin_unlock_irqrestore(&serial->lock, flags);
+	}
 }
 
+/*
+ * read(): one character per call.
+ * NEW (L1):
+ *  - wait_event_interruptible() is called WITHOUT the lock (it sleeps).
+ *    Its condition is only a hint; it is re-checked under the lock,
+ *    because another reader may have taken the char in between.
+ *  - put_user() is called AFTER unlocking: it may fault and sleep.
+ */
 static ssize_t serial_read(struct file *file, char __user *buf,
 			   size_t sz, loff_t *ppos)
 {
 	struct miscdevice *miscdev = file->private_data;
 	struct serial_dev *serial = container_of(miscdev, struct serial_dev, miscdev);
-	unsigned long flags;
+	unsigned long flags;		/* NEW (L1) */
 	char c;
 
 	if (sz == 0)
 		return 0;
 
-retry:
-	/* Sleep until the IRQ handler puts something in the buffer (may sleep: no lock held!) */
+retry:					/* NEW (L1) */
 	if (wait_event_interruptible(serial->wait,
 				     serial->buf_rd != serial->buf_wr))
-		return -ERESTARTSYS;	/* woken up by a signal (e.g. Ctrl-C) */
+		return -ERESTARTSYS;
 
-	spin_lock_irqsave(&serial->lock, flags);
+	spin_lock_irqsave(&serial->lock, flags);		/* NEW (L1) */
 
-	/* Another reader may have taken the character between wake-up and lock */
+	/* NEW (L1): check-then-act must be atomic: re-check under the lock */
 	if (serial->buf_rd == serial->buf_wr) {
 		spin_unlock_irqrestore(&serial->lock, flags);
 		goto retry;
@@ -87,15 +132,20 @@ retry:
 	if (serial->buf_rd >= SERIAL_BUFSIZE)
 		serial->buf_rd = 0;
 
-	spin_unlock_irqrestore(&serial->lock, flags);
+	spin_unlock_irqrestore(&serial->lock, flags);		/* NEW (L1) */
 
-	/* put_user() may fault and sleep: must be called outside the spinlock */
-	if (put_user(c, buf))
+	if (put_user(c, buf))		/* outside the lock: may sleep */
 		return -EFAULT;
 
-	return 1;	/* one character at a time */
+	return 1;
 }
 
+/*
+ * write(): two writers at the same time are allowed. Each character is
+ * sent atomically (serial_write_char), so the UART never gets confused,
+ * but the two strings may be interleaved on the wire.
+ * get_user() stays outside the lock (may sleep).
+ */
 static ssize_t serial_write(struct file *file, const char __user *buf,
 			    size_t sz, loff_t *ppos)
 {
@@ -117,14 +167,17 @@ static ssize_t serial_write(struct file *file, const char __user *buf,
 	return sz;
 }
 
+/*
+ * NEW (L1): txcount is also written by serial_write_char() under the lock.
+ * GET: take a snapshot under the lock, copy to user space after unlocking.
+ */
 static long serial_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct miscdevice *miscdev = file->private_data;
 	struct serial_dev *serial = container_of(miscdev, struct serial_dev, miscdev);
 	unsigned int __user *argp = (unsigned int __user *)arg;
-
-	unsigned long flags;
-	unsigned int count;
+	unsigned long flags;		/* NEW (L1) */
+	unsigned int count;		/* NEW (L1) */
 
 	switch (cmd) {
 	case SERIAL_RESET_COUNTER:
@@ -134,9 +187,9 @@ static long serial_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		break;
 	case SERIAL_GET_COUNTER:
 		spin_lock_irqsave(&serial->lock, flags);
-		count = serial->txcount;	/* snapshot under the lock */
+		count = serial->txcount;
 		spin_unlock_irqrestore(&serial->lock, flags);
-		if (put_user(count, argp))	/* copy to user space outside the lock */
+		if (put_user(count, argp))
 			return -EFAULT;
 		break;
 	default:
@@ -153,31 +206,45 @@ static const struct file_operations serial_fops = {
 	.unlocked_ioctl = serial_ioctl,
 };
 
+/*
+ * IRQ handler.
+ * NEW (L1): hard IRQ context, local IRQs are already disabled
+ * -> plain spin_lock() is enough (irqsave would be harmless but useless).
+ * wake_up() after unlocking: the reader does not spin on our lock
+ * right after being woken.
+ */
 static irqreturn_t serial_irq(int irq, void *dev_id)
 {
 	struct serial_dev *serial = dev_id;
-	unsigned int lsr, next;
+	unsigned int next;
+	u32 lsr;
 	char c;
 
-	/* Hard IRQ context: local IRQs are already disabled, plain spin_lock() is enough */
-	spin_lock(&serial->lock);
+	spin_lock(&serial->lock);		/* NEW (L1) */
 
-	/* Drain everything the UART has received (reading RX = ack) */
+	serial->irq_count++;
+
+	/* Drain everything received (with FIFOs off: at most one char) */
 	while ((lsr = reg_read(serial, UART_LSR)) & UART_LSR_DR) {
-		if (lsr & UART_LSR_OE)		/* reading LSR also clears OE */
+		if (lsr & UART_LSR_OE)
 			serial->hw_overrun++;
 
-		c = reg_read(serial, UART_RX);
-		next = (serial->buf_wr + 1) % SERIAL_BUFSIZE;
-		if (next == serial->buf_rd) {	/* buffer full: drop new char, keep old ones */
+		c = reg_read(serial, UART_RX);		/* ack */
+
+		/* NEW (L1), from I4-A: never wrap into an "empty" buffer */
+		next = serial->buf_wr + 1;
+		if (next >= SERIAL_BUFSIZE)
+			next = 0;
+		if (next == serial->buf_rd) {
 			serial->sw_overflow++;
-			continue;
+			continue;			/* drop the new char */
 		}
+
 		serial->rx_buf[serial->buf_wr] = c;
 		serial->buf_wr = next;
 	}
 
-	spin_unlock(&serial->lock);
+	spin_unlock(&serial->lock);		/* NEW (L1) */
 
 	wake_up(&serial->wait);
 
@@ -202,17 +269,28 @@ static int serial_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, serial);
 
+	/* Everything the handler uses must be ready before request_irq() */
+	init_waitqueue_head(&serial->wait);
+	spin_lock_init(&serial->lock);		/* NEW (L1) */
+
 	pm_runtime_enable(&pdev->dev);
-	pm_runtime_get_sync(&pdev->dev);
+	ret = pm_runtime_resume_and_get(&pdev->dev);
+	if (ret < 0) {
+		pm_runtime_disable(&pdev->dev);
+		return ret;
+	}
 
 	ret = of_property_read_u32(pdev->dev.of_node, "clock-frequency", &uartclk);
 	if (ret) {
-		dev_err(&pdev->dev, "clock-frequency property not found in DT\n");
+		dev_err(&pdev->dev, "clock-frequency property not found in Device Tree\n");
 		goto err_pm;
 	}
 
-	/* Configure the baud rate to 115200 */
-	baud_divisor = uartclk / 16 / 115200;
+	/*
+	 * Register setup without the lock: the IRQ is not requested yet and
+	 * the device file does not exist yet, nobody else can touch the UART.
+	 */
+	baud_divisor = uartclk / 16 / SERIAL_BAUD;
 	reg_write(serial, 0x07, UART_OMAP_MDR1);
 	reg_write(serial, 0x00, UART_LCR);
 	reg_write(serial, UART_LCR_DLAB, UART_LCR);
@@ -221,14 +299,8 @@ static int serial_probe(struct platform_device *pdev)
 	reg_write(serial, UART_LCR_WLEN8, UART_LCR);
 	reg_write(serial, 0x00, UART_OMAP_MDR1);
 
-	/* Clear UART FIFOs */
 	reg_write(serial, UART_FCR_CLEAR_RCVR | UART_FCR_CLEAR_XMIT, UART_FCR);
 
-	/* Must be ready before the IRQ can fire */
-	init_waitqueue_head(&serial->wait);
-	spin_lock_init(&serial->lock);
-
-	/* Register the interrupt handler */
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0) {
 		ret = irq;
@@ -236,16 +308,14 @@ static int serial_probe(struct platform_device *pdev)
 	}
 
 	ret = devm_request_irq(&pdev->dev, irq, serial_irq, 0,
-			       pdev->name, serial);
+			       dev_name(&pdev->dev), serial);
 	if (ret) {
-		dev_err(&pdev->dev, "cannot request irq %d\n", irq);
+		dev_err(&pdev->dev, "cannot request IRQ %d: %d\n", irq, ret);
 		goto err_pm;
 	}
 
-	/* Enable RX interrupt */
 	reg_write(serial, UART_IER_RDI, UART_IER);
 
-	/* Misc device */
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!res) {
 		ret = -ENODEV;
@@ -253,8 +323,8 @@ static int serial_probe(struct platform_device *pdev)
 	}
 
 	serial->miscdev.minor = MISC_DYNAMIC_MINOR;
-	serial->miscdev.name = devm_kasprintf(&pdev->dev, GFP_KERNEL,
-					      "serial-%x", (unsigned int)res->start);
+	serial->miscdev.name = devm_kasprintf(&pdev->dev, GFP_KERNEL, "serial-%x",
+					      (unsigned int)res->start);
 	if (!serial->miscdev.name) {
 		ret = -ENOMEM;
 		goto err_irq;
@@ -264,11 +334,13 @@ static int serial_probe(struct platform_device *pdev)
 
 	ret = misc_register(&serial->miscdev);
 	if (ret) {
-		dev_err(&pdev->dev, "misc_register failed\n");
+		dev_err(&pdev->dev, "misc_register failed: %d\n", ret);
 		goto err_irq;
 	}
 
-	dev_info(&pdev->dev, "probed, irq %d\n", irq);
+	dev_info(&pdev->dev, "registered /dev/%s, irq %d (locking L1)\n",
+		 serial->miscdev.name, irq);
+
 	return 0;
 
 err_irq:
@@ -283,13 +355,13 @@ static int serial_remove(struct platform_device *pdev)
 {
 	struct serial_dev *serial = platform_get_drvdata(pdev);
 
-	dev_info(&pdev->dev, "sw_overflow=%u hw_overrun=%u\n",
-		 serial->sw_overflow, serial->hw_overrun);
-
-	/* Disable interrupts before the clock goes away (devm frees the IRQ later) */
-	reg_write(serial, 0, UART_IER);
+	dev_info(&pdev->dev, "irq_count=%u sw_overflow=%u hw_overrun=%u\n",
+		 serial->irq_count, serial->sw_overflow, serial->hw_overrun);
 
 	misc_deregister(&serial->miscdev);
+
+	reg_write(serial, 0, UART_IER);
+
 	pm_runtime_put_sync(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
 
@@ -298,7 +370,7 @@ static int serial_remove(struct platform_device *pdev)
 
 static const struct of_device_id serial_of_match[] = {
 	{ .compatible = "bootlin,serial" },
-	{ }
+	{ },
 };
 MODULE_DEVICE_TABLE(of, serial_of_match);
 
@@ -313,4 +385,4 @@ static struct platform_driver serial_driver = {
 module_platform_driver(serial_driver);
 
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("Bootlin lab serial driver");
+MODULE_DESCRIPTION("Locking lab review L1: spinlock for RX buffer and UART registers");
