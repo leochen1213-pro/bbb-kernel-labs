@@ -1,0 +1,48 @@
+From b8fff0fe1b49892f56dbbe98246034c38acb6025 Mon Sep 17 00:00:00 2001
+From: Leo <leochen1213@gmail.com>
+Date: Mon, 19 Oct 2026 16:22:29 +0800
+Subject: [PATCH 3/3] ARM: dts: am335x-boneblack-custom: enable SPI1 with an
+ ADXL345
+
+ADXL345 on SPI1 CS0: SPI mode 3, 5 MHz, INT1 level-high on gpio1_17 (the INT pin stays high until INT_SOURCE or the data registers are read).
+
+Signed-off-by: Leo <leochen1213@gmail.com>
+---
+ .../dts/ti/omap/am335x-boneblack-custom.dts   | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+diff --git a/arch/arm/boot/dts/ti/omap/am335x-boneblack-custom.dts b/arch/arm/boot/dts/ti/omap/am335x-boneblack-custom.dts
+index 366ecd11a65c..91d20f72ef78 100644
+--- a/arch/arm/boot/dts/ti/omap/am335x-boneblack-custom.dts
++++ b/arch/arm/boot/dts/ti/omap/am335x-boneblack-custom.dts
+@@ -1,4 +1,5 @@
+ // SPDX-License-Identifier: GPL-2.0
++#include <dt-bindings/interrupt-controller/irq.h>
+ #include "am335x-boneblack.dts"
+ #include <dt-bindings/interrupt-controller/irq.h>
+ 
+@@ -121,3 +122,21 @@ AM33XX_PADCONF(AM335X_PIN_GPMC_A1, PIN_INPUT_PULLDOWN, MUX_MODE7)	/* P9_23 gpio1
+ 		>;
+ 	};
+ };
++
++&spi1 {
++	pinctrl-names = "default";
++	pinctrl-0 = <&spi1_pins>;
++	status = "okay";
++
++	accelerometer@0 {
++		compatible = "adi,adxl345";
++		reg = <0>;
++		spi-max-frequency = <5000000>;
++		spi-cpol;
++		spi-cpha;
++		pinctrl-names = "default";
++		pinctrl-0 = <&adxl345_int_pins>;
++		interrupt-parent = <&gpio1>;
++		interrupts = <17 IRQ_TYPE_LEVEL_HIGH>;
++	};
++};
+-- 
+2.43.0
+

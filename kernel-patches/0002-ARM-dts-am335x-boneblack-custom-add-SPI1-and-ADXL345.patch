@@ -1,0 +1,41 @@
+From 86fd979d55c0b530071401410767ac3274740f6d Mon Sep 17 00:00:00 2001
+From: Leo <leochen1213@gmail.com>
+Date: Mon, 19 Oct 2026 16:21:36 +0800
+Subject: [PATCH 2/3] ARM: dts: am335x-boneblack-custom: add SPI1 and ADXL345
+ INT1 pinmux
+
+SPI1 on P9_28-31 (mode 3). SCLK must be an input as well: the McSPI samples its own clock to clock data in. INT1 on P9_23 (gpio1_17, mode 7, pull-down).
+
+Signed-off-by: Leo <leochen1213@gmail.com>
+---
+ .../dts/ti/omap/am335x-boneblack-custom.dts     | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/arch/arm/boot/dts/ti/omap/am335x-boneblack-custom.dts b/arch/arm/boot/dts/ti/omap/am335x-boneblack-custom.dts
+index 692a6658b5b8..366ecd11a65c 100644
+--- a/arch/arm/boot/dts/ti/omap/am335x-boneblack-custom.dts
++++ b/arch/arm/boot/dts/ti/omap/am335x-boneblack-custom.dts
+@@ -104,3 +104,20 @@ &mcasp0 {
+ &{/sound} {
+ 	status = "disabled";
+ };
++
++&am33xx_pinmux {
++	spi1_pins: spi1-pins {
++		pinctrl-single,pins = <
++			AM33XX_PADCONF(AM335X_PIN_MCASP0_ACLKX, PIN_INPUT, MUX_MODE3)	/* P9_31 sclk, input too */
++			AM33XX_PADCONF(AM335X_PIN_MCASP0_FSX, PIN_INPUT, MUX_MODE3)	/* P9_29 d0 = MISO */
++			AM33XX_PADCONF(AM335X_PIN_MCASP0_AXR0, PIN_OUTPUT, MUX_MODE3)	/* P9_30 d1 = MOSI */
++			AM33XX_PADCONF(AM335X_PIN_MCASP0_AHCLKR, PIN_OUTPUT, MUX_MODE3)	/* P9_28 cs0 */
++		>;
++	};
++
++	adxl345_int_pins: adxl345-int-pins {
++		pinctrl-single,pins = <
++			AM33XX_PADCONF(AM335X_PIN_GPMC_A1, PIN_INPUT_PULLDOWN, MUX_MODE7)	/* P9_23 gpio1_17 */
++		>;
++	};
++};
+-- 
+2.43.0
+
