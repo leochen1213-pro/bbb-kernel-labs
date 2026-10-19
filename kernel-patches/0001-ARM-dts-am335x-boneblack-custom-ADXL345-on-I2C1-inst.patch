@@ -1,0 +1,43 @@
+From fcf8a56f5ac8dc39d280262cd4ae7b3ea590aaad Mon Sep 17 00:00:00 2001
+From: Leo <leochen1213@gmail.com>
+Date: Mon, 19 Oct 2026 18:03:34 +0800
+Subject: [PATCH] ARM: dts: am335x-boneblack-custom: ADXL345 on I2C1 instead of
+ SPI1
+
+The ADXL345 module at hand ties SDO to GND (I2C address 0x53), so SPI reads always return 0. Disable the SPI1 child node and describe the sensor on I2C1 at 0x53, INT1 on gpio1_17 unchanged. SPI1 itself stays enabled for a later module.
+
+Signed-off-by: Leo <leochen1213@gmail.com>
+---
+ .../arm/boot/dts/ti/omap/am335x-boneblack-custom.dts | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/arch/arm/boot/dts/ti/omap/am335x-boneblack-custom.dts b/arch/arm/boot/dts/ti/omap/am335x-boneblack-custom.dts
+index 91d20f72ef78..71a63ff8fac2 100644
+--- a/arch/arm/boot/dts/ti/omap/am335x-boneblack-custom.dts
++++ b/arch/arm/boot/dts/ti/omap/am335x-boneblack-custom.dts
+@@ -129,6 +129,7 @@ &spi1 {
+ 	status = "okay";
+ 
+ 	accelerometer@0 {
++		status = "disabled";	/* module has SDO tied to GND: no SPI */
+ 		compatible = "adi,adxl345";
+ 		reg = <0>;
+ 		spi-max-frequency = <5000000>;
+@@ -140,3 +141,14 @@ accelerometer@0 {
+ 		interrupts = <17 IRQ_TYPE_LEVEL_HIGH>;
+ 	};
+ };
++
++&i2c1 {
++	accelerometer@53 {
++		compatible = "adi,adxl345";
++		reg = <0x53>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&adxl345_int_pins>;
++		interrupt-parent = <&gpio1>;
++		interrupts = <17 IRQ_TYPE_LEVEL_HIGH>;
++	};
++};
+-- 
+2.43.0
+
