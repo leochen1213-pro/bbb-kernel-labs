@@ -2,12 +2,17 @@
 # Experiment A: in every round two writers change the scale at the same
 # time (one write each), then check that the cached scale matches
 # DATA_FORMAT (reg 0x31).
-# usage: sh exp_a.sh [rounds]
-R=/sys/kernel/debug/regmap/spi1.0/registers
+# usage: sh exp_a.sh [rounds] [spi1.0|1-0053]
+# pick the first leo-adxl345, or the one on bus device $2 (spi1.0, 1-0053)
 for d in /sys/bus/iio/devices/iio:device*; do
-	[ "$(cat "$d/name" 2>/dev/null)" = "leo-adxl345" ] && D=$d
+	[ "$(cat "$d/name" 2>/dev/null)" = "leo-adxl345" ] || continue
+	p=$(basename "$(dirname "$(readlink -f "$d")")")
+	if [ -z "$2" ] || [ "$2" = "$p" ]; then D=$d; P=$p; break; fi
 done
 [ -n "$D" ] || { echo "leo-adxl345 not found" >&2; exit 1; }
+# the regmap debugfs directory is named after the bus device
+R=/sys/kernel/debug/regmap/$P/registers
+echo "$D on $P"
 mount | grep -q debugfs || mount -t debugfs none /sys/kernel/debug
 
 bad=0
